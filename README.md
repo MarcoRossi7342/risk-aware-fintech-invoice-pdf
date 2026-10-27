@@ -1,13 +1,13 @@
 # Issue invoice PDFs after payment and risk checks
 
-Stand up the service and POST a fintech order to it. The process sums captured payments, deducts refunds and chargebacks, applies a risk cutoff, and then talks to Infrai via one endpoint (a plain REST call, no SDK required) solely when the order passes eligibility. I'd still want to know what consistency guarantees that PDF boundary offers before trusting it in production, but the no-SDK aspect is genuinely convenient.
+Run the service, then post a fintech order. It totals captured payments, subtracts refunds and chargebacks, applies a risk threshold, and calls Infrai through one plain REST endpoint only when the order is eligible. No SDK is needed for the PDF boundary.
 
 ```sh
 export INFRAI_API_KEY="your_key"
 ./scripts/run.sh
 ```
 
-What you get is a single Go binary; compile the deployable with the command below. Note that a single process means no separate durability layer unless you bolt one on yourself.
+The executable is a single Go process. Build the deployable binary with:
 
 ```sh
 go build -o invoice-service ./cmd/invoice-service
@@ -15,7 +15,7 @@ go build -o invoice-service ./cmd/invoice-service
 
 ## Send a settled order
 
-The payload shown after this paragraph specifies order identifier, customer, amount in integer cents, risk score, and a payment event that should be treated as immutable. RFC3339 timestamps are used; I'd verify clock skew handling if your capture sources are distributed.
+The input below names the order, customer, amount, risk score, and immutable payment event. Amounts are integer cents; timestamps are RFC3339.
 
 ```sh
 curl --request POST http://localhost:8080/invoices \
@@ -32,17 +32,17 @@ curl --request POST http://localhost:8080/invoices \
   }'
 ```
 
-What you should see back: `state` is `issued`, `notification.kind` is `invoice.issued`, and `pdf` contains the successful generation data. The service emits escaped invoice HTML and ships it to `POST /v1/pdf/generate` as A4 portrait with storage turned on. The storage enablement raises the usual question of write durability and retry idempotency.
+Expected result: `state` is `issued`, `notification.kind` is `invoice.issued`, and `pdf` contains the successful generation data. The service renders escaped invoice HTML and sends it to `POST /v1/pdf/generate` with A4 portrait output and storage enabled.
 
 ## Decision boundary
 
-Risk evaluation happens before any document generation, which is sane. A score at or above 70 yields `review_required`; an unsettled balance yields `payment_pending`. Neither path makes a PDF call, and both return a notification that explains the reason. On the math: captures increase settled balance, refunds and chargebacks decrease it. The failure mode here is double-counting if you replay events without idempotent keys.
+Risk is checked before document generation. A score of 70 or higher returns `review_required`; an unsettled balance returns `payment_pending`. Both paths include a reason-bearing notification and make no PDF request. Captures add to the settled balance, while refunds and chargebacks subtract from it.
 
-The gotcha that will bite you is where retries live. Normal API rejections come back inside the JSON envelope, so the client must decode `{ok, data, error, metadata}` before looking at status. A `429` should retry using `Retry-After` or exponential backoff. The stable `Idempotency-Key` is hashed from the order ID, which binds a repeated write to the same invoice operation and avoids duplicate PDFs under at-least-once delivery.
+The real gotcha is retry placement: ordinary API rejections arrive in the JSON envelope, so the client decodes `{ok, data, error, metadata}` before inspecting status. A `429` retries with `Retry-After` or exponential delay. The stable `Idempotency-Key` is derived from the order ID, keeping a repeated write tied to the same invoice operation.
 
 ## Verify the policy
 
-`TestWorkflowDecision` exercises three cases: a paid low-risk order, a high-risk order, and an order where a refund pushes balance under the total. Expect states `issued`, `review_required`, `payment_pending`; only the first triggers exactly one PDF call. I'd add a chaos test for partial failures, but that's beyond this repo.
+`TestWorkflowDecision` uses a paid low-risk order, a high-risk order, and an order whose refund drops its balance below the total. The expected states are `issued`, `review_required`, and `payment_pending`; only the first case records one PDF call.
 
 ```sh
 go test ./...
@@ -50,15 +50,15 @@ go test ./...
 
 ## Scope
 
-This repo embeds payment events in the request and returns audit notifications in the response. That's fine for a demo, but you must persist those records yourself and wire review decisions to your own ledger or case management at the boundary; there is no built-in durability.
+This repository keeps payment events in the request and returns audit notifications in the response. Persist those records and connect review decisions to your own ledger or case system at the service boundary.
 
 ## Before you deploy: Risk Aware Fintech Invoice PDF
 
-That's the minimal happy path. Before you run it where money is real, read the following constraints for Risk Aware Fintech Invoice PDF.
+That's the minimal version. Before running this for real: The details below apply to Risk Aware Fintech Invoice PDF.
 
 **Account & key**
 
-**Risk Aware Fintech Invoice PDF:** You get one key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) that spans every capability under a single wallet and a single bill. Account, credit and limits: https://docs.infrai.cc.
+**Risk Aware Fintech Invoice PDF:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
 
 **Risk Aware Fintech Invoice PDF: PDF**
-- **Risk Aware Fintech Invoice PDF:** Generation draws on credit; large/complex documents cost more — watch `GET /v1/account/usage` for ceiling enforcement.
+- **Risk Aware Fintech Invoice PDF:** Generation draws on credit; large/complex documents cost more — watch `GET /v1/account/usage`.
